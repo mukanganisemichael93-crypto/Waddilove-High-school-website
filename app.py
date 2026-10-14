@@ -280,7 +280,6 @@ def admin_media():
                             key={'left_logo':'school_logo_left_url','right_logo':'school_logo_right_url','homepage_bg':'homepage_background_url','hero':'homepage_background_url'}[cat]
                             c.execute('INSERT INTO portal_settings(setting_key,setting_value) VALUES(%s,%s) ON CONFLICT(setting_key) DO UPDATE SET setting_value=EXCLUDED.setting_value',(key,url))
                 audit('image_uploaded',f'{cat}: {title}'); flash('Image uploaded. Logos appear beside the school name; the homepage background fills the home-page hero area.')
-         ```python
         elif action == 'delete':
             with connect() as conn:
                 with conn.cursor() as c:
