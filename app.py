@@ -280,15 +280,121 @@ def admin_media():
                             key={'left_logo':'school_logo_left_url','right_logo':'school_logo_right_url','homepage_bg':'homepage_background_url','hero':'homepage_background_url'}[cat]
                             c.execute('INSERT INTO portal_settings(setting_key,setting_value) VALUES(%s,%s) ON CONFLICT(setting_key) DO UPDATE SET setting_value=EXCLUDED.setting_value',(key,url))
                 audit('image_uploaded',f'{cat}: {title}'); flash('Image uploaded. Logos appear beside the school name; the homepage background fills the home-page hero area.')
-            elif action=='delete':
-                with connect() as conn:
-                    with conn.cursor() as c: c.execute('SELECT storage_path,title,category,image_url FROM portal_media WHERE id=%s',(request.form['id'],)); old=c.fetchone(); c.execute('DELETE FROM portal_media WHERE id=%s',(request.form['id'],))
-                    if old and old[2] in ('left_logo','right_logo','homepage_bg','hero'):
-                        key={'left_logo':'school_logo_left_url','right_logo':'school_logo_right_url','homepage_bg':'homepage_background_url','hero':'homepage_background_url'}[old[2]]
-                        c.execute("UPDATE portal_settings SET setting_value='' WHERE setting_key=%s AND setting_value=%s",(key,old[3]))
-                if old and SB_URL and SB_KEY:
-                    url=f"{SB_URL}/storage/v1/object/{quote(BUCKET,safe='')}/{quote(old[0],safe='/')}"; requests.delete(url,headers={'Authorization':f'Bearer {SB_KEY}','apikey':SB_KEY},timeout=20)
-                audit('image_deleted',old[1] if old else 'unknown'); flash('Image deleted.')
+         ```python
+        elif action == 'delete':
+            with connect() as conn:
+                with conn.cursor() as c:
+                    c.execute(
+                        'SELECT storage_path, title, category, image_url '
+                        'FROM portal_media WHERE id=%s',
+                        (request.form['id'],)
+                    )
+                    old = c.fetchone()
+                    if not old:
+                        flash('Image record not found.', 'error')
+                        return redirect(url_for('admin_media'))
+
+                    storage_path, title, category, image_url = old
+
+                    # Delete the file from Supabase Storage first.
+                    if storage_path and SB_URL and SB_KEY:
+                        from urllib.parse import unquote
+
+                        path = storage_path.strip()
+
+                        # Extract the path if a full Storage URL was saved.
+                        markers = [
+                            f'/storage/v1/object/public/{BUCKET}/',
+                            f'/storage/v1/object/{BUCKET}/'
+                        ]
+
+                        for marker in markers:
+                            if marker in path:
+                                path = path.split(marker, 1)[1]
+                                break
+
+                        path = unquote(path).lstrip('/')
+
+                        # Avoid including the bucket name twice.
+                        if path.startswith(f'{BUCKET}/'):
+                            path = path[len(BUCKET) + 1:]
+
+                        if not path or path.startswith('http'):
+                            flash(
+                                'Invalid image storage path. '
+                                'The image record was not deleted.',
+                                'error'
+                            )
+                            return redirect(url_for('admin_media'))
+
+                        url = (
+                            f"{SB_URL.rstrip('/')}/storage/v1/object/"
+                            f"{quote(BUCKET, safe='')}/"
+                            f"{quote(path, safe='/')}"
+                        )
+
+                        response = requests.delete(
+                            url,
+                            headers={
+                                'Authorization': f'Bearer {SB_KEY}',
+                                'apikey': SB_KEY
+                            },
+                            timeout=20
+                        )
+
+                        if response.status_code not in (200, 204):
+                            app.logger.error(
+                                'Supabase delete failed: HTTP %s; %s',
+                                response.status_code,
+                                response.text[:500]
+                            )
+                            flash(
+                                f'Supabase file deletion failed '
+                                f'(HTTP {response.status_code}). '
+                                'Check Render logs.',
+                                'error'
+                            )
+                            return redirect(url_for('admin_media'))
+
+                    elif storage_path:
+                        flash(
+                            'Supabase configuration is missing. '
+                            'The image record was not deleted.',
+                            'error'
+                        )
+                        return redirect(url_for('admin_media'))
+
+                    # Remove the database record only after Storage succeeds.
+                    with connect() as conn:
+                        with conn.cursor() as c:
+                            c.execute(
+                                'DELETE FROM portal_media WHERE id=%s',
+                                (request.form['id'],)
+                            )
+
+                            if category in (
+                                'left_logo',
+                                'right_logo',
+                                'homepage_bg',
+                                'hero'
+                            ):
+                                key = {
+                                    'left_logo': 'school_logo_left_url',
+                                    'right_logo': 'school_logo_right_url',
+                                    'homepage_bg': 'homepage_background_url',
+                                    'hero': 'homepage_background_url'
+                                }[category]
+
+                                c.execute(
+                                    "UPDATE portal_settings "
+                                    "SET setting_value='' "
+                                    "WHERE setting_key=%s "
+                                    "AND setting_value=%s",
+                                    (key, image_url)
+                                )
+
+            audit('image_deleted', title)
+            flash('Image deleted successfully.')
         except Exception as e: flash(str(e) if isinstance(e,ValueError) else 'Image upload/delete failed. Check the Supabase Storage bucket and key.','error')
         return redirect(url_for('admin_media'))
     return page('Images',r'''<div class="hero"><h1>Images and gallery</h1><p>Select image files stored on this computer. They are uploaded to your Supabase Storage bucket, not entered as URLs.</p></div><div class="card"><form method="post" enctype="multipart/form-data"><input type="hidden" name="_csrf" value="{{ csrf_token() }}"><input type="hidden" name="action" value="upload"><div class="grid"><div><label>Image title</label><input name="title" placeholder="Sports day 2026"></div><div><label>Category</label><select name="category"><option value="left_logo">School logo (left of name)</option><option value="right_logo">School logo (right of name)</option><option value="homepage_bg">Homepage background picture</option><option value="gallery">Gallery</option><option value="sports">Sports</option><option value="club">Clubs</option><option value="partner">Partner logo</option></select></div><div><label>Alternative text</label><input name="alt_text" placeholder="Describe the picture"></div><div><label>Choose image file (max 8 MB)</label><input type="file" name="image" accept="image/png,image/jpeg,image/webp,image/gif" required></div></div><button>Upload selected image</button></form></div><div class="grid">{% for r in rows %}<div class="card"><a href="{{ r[3] }}" target="_blank" rel="noopener"><img class="media" style="height:180px;object-fit:contain;background:#f5f7fb;padding:8px" src="{{ r[3] }}" alt="{{ r[5] or r[1] }}"></a><h3>{{ r[1] }}</h3><p class="muted">{{ r[2] }}</p><form method="post" onsubmit="return confirm('Delete this image?')"><input type="hidden" name="_csrf" value="{{ csrf_token() }}"><input type="hidden" name="action" value="delete"><input type="hidden" name="id" value="{{ r[0] }}"><button class="danger">Delete image</button></form></div>{% else %}<div class="card">No images uploaded yet.</div>{% endfor %}</div>''',rows=media_rows())
